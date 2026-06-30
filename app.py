@@ -240,8 +240,8 @@ def search_quran_full(terms: list[str]) -> tuple[str, int]:
     # Sort by score descending, then by surah/ayah
     scored.sort(key=lambda x: (-x[0], x[1]["surah_no"], x[1]["ayah_no"]))
 
-    # Take top 25 most relevant verses
-    top = scored[:25]
+    # Take top 12 most relevant verses to stay within token limits
+    top = scored[:12]
 
     if not top:
         return "", 0
@@ -294,7 +294,7 @@ def search_hadith_full(terms: list[str]) -> tuple[str, int]:
                     scored.append((score, bname, h))
 
     scored.sort(key=lambda x: -x[0])
-    top = scored[:20]
+    top = scored[:10]  # top 10 hadiths to stay within token limits
 
     if not top:
         return "", 0
@@ -303,9 +303,12 @@ def search_hadith_full(terms: list[str]) -> tuple[str, int]:
     for _, book_name, h in top:
         narrator = h.get("by", "")
         nar_str  = f" — Narrated by: {narrator}" if narrator else ""
+        text     = h.get("text", "")
+        # Truncate very long hadiths to keep payload manageable
+        if len(text) > 600:
+            text = text[:600] + "…"
         lines.append(
-            f"[{book_name}, Hadith #{h.get('hadithnumber','')}{nar_str}]\n"
-            f"{h.get('text','')}"
+            f"[{book_name}, Hadith #{h.get('hadithnumber','')}{nar_str}]\n{text}"
         )
 
     return "\n\n".join(lines), len(top)
@@ -393,7 +396,7 @@ def ask_groq_full(question: str, context: str) -> str:
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user",   "content": user_msg},
         ],
-        max_tokens=4096,
+        max_tokens=3500,
         temperature=0.1,
     )
 
