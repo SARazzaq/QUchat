@@ -576,12 +576,6 @@ st.markdown("""
 </div><hr>
 """, unsafe_allow_html=True)
 
-st.info(
-    "⚠️ **Disclaimer:** Answers are AI-generated from authentic Islamic sources. "
-    "Always verify with a qualified Islamic scholar. "
-    "Quran: Sahih International · Hadith: Bukhari, Muslim, Abu Dawud, Tirmidhi."
-)
-
 # ── Silent background warm-up ─────────────────────────────────────────────────
 if "warmed" not in st.session_state:
     st.session_state["warmed"] = True
@@ -591,7 +585,12 @@ if "warmed" not in st.session_state:
 # CHAT UI
 # ══════════════════════════════════════════════════════════════════════════════
 if "messages" not in st.session_state:
-    st.session_state.messages = []
+    st.session_state.messages = [
+        {"role": "assistant", "content":
+         "⚠️ *Generated with AI — answers may contain mistakes. "
+         "Always verify with a qualified Islamic scholar.*\n\n"
+         "As-salamu alaykum! Ask me anything about the Quran or Hadith."}
+    ]
 
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
@@ -679,7 +678,10 @@ st.markdown("""
   LLM · <a href="https://groq.com">Groq</a> Llama 3.3 70B (streaming) &nbsp;·&nbsp;
   UI · <a href="https://streamlit.io">Streamlit</a>
 </p>
-<p style="text-align:center;color:#2a4a2a;font-size:0.72rem;margin:0 0 1rem 0;">
+<p style="text-align:center;color:#3a5a3a;font-size:0.72rem;margin:0 0 0.3rem 0;">
   All sources free &amp; open. No user data stored.
+</p>
+<p style="text-align:center;color:#4a6a4a;font-size:0.70rem;margin:0 0 1rem 0;">
+  ⚠️ AI-generated answers — verify with a qualified Islamic scholar.
 </p>
 """, unsafe_allow_html=True)
