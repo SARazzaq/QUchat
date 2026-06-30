@@ -28,6 +28,12 @@ import streamlit as st
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+try:
+    from textblob import TextBlob
+    _TEXTBLOB_OK = True
+except ImportError:
+    _TEXTBLOB_OK = False
+
 import bm25s
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
@@ -102,6 +108,112 @@ _SYN: dict[str, list[str]] = {
     "shirk":       ["polytheism","association","idol","partner","worship"],
     "tawhid":      ["monotheism","oneness","unity","god","allah"],
 }
+
+
+# ── Islamic term corrections (common misspellings → correct form) ─────────────
+_ISLAMIC_CORRECTIONS: dict[str, str] = {
+    "quran":"quran","koran":"quran","quraan":"quran",
+    "surah":"surah","sura":"surah","soorah":"surah",
+    "ayah":"ayah","ayat":"ayah","aayah":"ayah",
+    "salah":"salah","salaah":"salah","salaat":"salah",
+    "wudu":"wudu","wudhu":"wudu","wuzu":"wudu","wudoo":"wudu",
+    "sawm":"sawm","sawn":"sawm","saum":"sawm",
+    "zakat":"zakat","zakah":"zakat","zakaah":"zakat","zakaat":"zakat",
+    "hajj":"hajj","haj":"hajj","hadj":"hajj",
+    "umrah":"umrah","umra":"umrah","omra":"umrah",
+    "jihad":"jihad","jehad":"jihad","jihaad":"jihad",
+    "halal":"halal","halaal":"halal","hallal":"halal",
+    "haram":"haram","haraam":"haram","haaram":"haram",
+    "jannah":"jannah","jana":"jannah","jannat":"jannah","janah":"jannah",
+    "jahannam":"jahannam","jahanam":"jahannam","jahannum":"jahannam",
+    "barzakh":"barzakh","barzak":"barzakh",
+    "akhirah":"akhirah","akhira":"akhirah","aakhirah":"akhirah","aakhira":"akhirah",
+    "qiyamah":"qiyamah","qiyama":"qiyamah","kiyamat":"qiyamah","qiyamat":"qiyamah",
+    "tawhid":"tawhid","tawheed":"tawhid","tawhed":"tawhid",
+    "shirk":"shirk","shrik":"shirk",
+    "tawbah":"tawbah","tauba":"tawbah","tawba":"tawbah","tobah":"tawbah",
+    "taqwa":"taqwa","taqwaa":"taqwa","taqua":"taqwa",
+    "iman":"iman","eiman":"iman","emaan":"iman","imaan":"iman",
+    "muhammad":"muhammad","mohammmed":"muhammad","mohammed":"muhammad",
+    "mohamad":"muhammad","muhammed":"muhammad","muhamad":"muhammad",
+    "rasool":"rasool","rasul":"rasool",
+    "sunnah":"sunnah","sunna":"sunnah","sunah":"sunnah",
+    "hadees":"hadith","hadis":"hadith","hadeeth":"hadith",
+    "sahih":"sahih","sahee":"sahih","saheeh":"sahih",
+    "bukhari":"bukhari","bukhary":"bukhari","bukhaari":"bukhari",
+    "sadaqah":"sadaqah","sadaqa":"sadaqah","sadaka":"sadaqah",
+    "dua":"dua","duaa":"dua",
+    "nikah":"nikah","nikkah":"nikah","nikaah":"nikah",
+    "talaq":"talaq","talaaq":"talaq","tallaq":"talaq",
+    "riba":"riba","ribaa":"riba","reba":"riba",
+    "hijab":"hijab","hijaab":"hijab",
+    "khamr":"khamr","khamar":"khamr","khamer":"khamr",
+    "israfil":"israfil","israafeel":"israfil","israfeel":"israfil",
+    "ruh":"ruh","rooh":"ruh","roh":"ruh",
+    "nafs":"nafs","sabr":"sabr","saber":"sabr","sabar":"sabr",
+    "namaz":"salah","nammaz":"salah","namaaz":"salah",
+    "roza":"sawm","rozah":"sawm",
+    "forgivness":"forgiveness","forgivenes":"forgiveness",
+    "resurection":"resurrection","resurection":"resurrection",
+    "hereaftr":"hereafter","hereaftar":"hereafter",
+    "judgement":"judgment","judgmnt":"judgment",
+    "paradis":"paradise","paradize":"paradise",
+    "propht":"prophet","prohet":"prophet","prohpet":"prophet",
+    "allh":"allah","alah":"allah",
+    "namz":"salah","nmaz":"salah",
+}
+
+_PROTECT = set(_ISLAMIC_CORRECTIONS.keys()) | {
+    "allah","quran","surah","ayah","salah","salat","sawm","zakat","hajj",
+    "jannah","jahannam","barzakh","akhirah","qiyamah","tawhid","shirk",
+    "tawbah","taqwa","iman","muhammad","rasool","sunnah","hadith","sahih",
+    "bukhari","muslim","sadaqah","dua","nikah","talaq","riba","hijab",
+    "khamr","israfil","malak","ruh","nafs","ilm","sabr","adl","namaz",
+    "roza","wudu","jihad","haram","halal","makkah","madinah","kaaba",
+    "tawaf","ihram","arafat","umrah","iftar","suhoor","ramadan","masjid",
+    "imam","fard","wajib","mubah","seerah","ummah","khalifah","pbuh",
+    "saw","swt","subhanahu","wasallam","alayhi","tafsir","fatwa","fiqh",
+    "shariah","ijtihad","israfeel","munkar","nakir","israfil","azrael",
+}
+
+
+def correct_spelling(text: str) -> tuple[str, bool]:
+    """
+    Two-pass spelling correction:
+    1. Islamic dict corrections (protects Islamic terms from being mangled)
+    2. TextBlob general English correction for remaining words
+    Returns (corrected_text, was_changed).
+    """
+    words  = text.split()
+    result = []
+    changed = False
+
+    for word in words:
+        clean  = word.strip(string.punctuation).lower()
+        prefix = word[:len(word) - len(word.lstrip(string.punctuation))]
+        suffix = word[len(word.rstrip(string.punctuation)):]
+        core   = word.strip(string.punctuation)
+
+        if clean in _ISLAMIC_CORRECTIONS:
+            fix = _ISLAMIC_CORRECTIONS[clean]
+            if fix != clean:
+                changed = True
+            result.append(prefix + fix + suffix)
+        elif clean in _PROTECT or len(clean) <= 2 or not clean.isalpha():
+            result.append(word)
+        elif _TEXTBLOB_OK:
+            try:
+                fix = str(TextBlob(core).correct())
+                if fix.lower() != core.lower():
+                    changed = True
+                result.append(prefix + fix + suffix)
+            except Exception:
+                result.append(word)
+        else:
+            result.append(word)
+
+    return " ".join(result), changed
+
 
 def expand_query(question: str) -> list[str]:
     """Instant local expansion using Islamic synonym dict + stemming."""
@@ -493,11 +605,15 @@ if user_input := st.chat_input("Ask about the Quran or Islam…"):
     with st.chat_message("assistant"):
         with st.status("🔍 Searching…", expanded=True) as status:
 
-            st.write("⚡ **Stage 1** — BM25S sparse retrieval (top-200 candidates)…")
+            # ── Spell correction ──────────────────────────────────────────
+            corrected_input, was_corrected = correct_spelling(user_input)
+            if was_corrected and corrected_input.lower() != user_input.lower():
+                st.write(f"✏️ **Auto-corrected:** *\"{user_input}\"* → **\"{corrected_input}\"**")
+            search_query = corrected_input
             st.write("⚡ **Stage 2** — TF-IDF cosine re-ranking on candidates…")
             st.write("⚡ **Stage 3** — Reciprocal Rank Fusion (BM25S + cosine)…")
 
-            q_hits, h_hits, terms, elapsed = search(user_input, top_n=15)
+            q_hits, h_hits, terms, elapsed = search(search_query, top_n=15)
 
             st.write(f"✅ **Search complete in {elapsed:.3f}s**")
             st.write(f"&nbsp;&nbsp;&nbsp;&nbsp;↳ {len(terms)} query terms · "
@@ -547,7 +663,7 @@ if user_input := st.chat_input("Ask about the Quran or Islam…"):
         if q_hits or h_hits:
             full = ""
             placeholder = st.empty()
-            for chunk in stream_answer(user_input, q_hits[:8], h_hits[:6]):
+            for chunk in stream_answer(search_query, q_hits[:8], h_hits[:6]):
                 full += chunk
                 placeholder.markdown(full + "▌")
             placeholder.markdown(full)
