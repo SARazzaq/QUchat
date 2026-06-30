@@ -463,42 +463,82 @@ if user_input := st.chat_input("Ask about the Quran or Islam…"):
 
     with st.chat_message("assistant"):
 
-        # Step 1 — LLM query expansion
-        with st.spinner("🧠 Generating Islamic search dimensions…"):
+        with st.status("🔍 Researching your question…", expanded=True) as status:
+
+            # ── Step 1: LLM query expansion ───────────────────────────────
+            st.write("🧠 **Step 1/4** — Analysing question from 10 Islamic angles…")
             terms = generate_search_terms(user_input)
-        with st.expander(f"🔎 {len(terms)} search terms generated"):
-            st.write(", ".join(terms))
+            st.write(f"✅ Generated **{len(terms)} search dimensions**: "
+                     f"`{', '.join(terms[:8])}{'…' if len(terms) > 8 else ''}`")
 
-        # Step 2 — BM25 retrieval over full corpus
-        with st.spinner("📖 BM25 search across all 6,236 Quran verses…"):
+            # ── Step 2: Quran BM25 retrieval ──────────────────────────────
+            st.write("📖 **Step 2/4** — BM25 ranking across all **6,236 Quran verses** "
+                     "(Sahih International)…")
+            st.write("&nbsp;&nbsp;&nbsp;&nbsp;↳ Normalising query: lemmatisation + stemming via NLTK")
+            st.write("&nbsp;&nbsp;&nbsp;&nbsp;↳ Scoring every verse with BM25Okapi "
+                     "(TF-IDF + document length normalisation)")
+            st.write("&nbsp;&nbsp;&nbsp;&nbsp;↳ Phrase-match re-ranking for multi-word terms")
             q_all = retrieve_quran(terms, top_n=15)
-
-        with st.spinner("📜 BM25 search across all Hadith books…"):
-            h_all = retrieve_hadith(terms, top_n=15)
-
-        if not q_all and not h_all:
-            answer = (
-                "No relevant verses or Hadiths found. "
-                "Please rephrase or ask about a specific topic."
-            )
-            st.markdown(answer)
-        else:
-            # Show all found in expanders
             if q_all:
-                with st.expander(f"📖 {len(q_all)} Quran verses found (top 8 sent to AI)"):
-                    st.text(fmt_quran_display(q_all))
-            if h_all:
-                with st.expander(f"📜 {len(h_all)} Hadiths found (top 6 sent to AI)"):
-                    st.text(fmt_hadith_display(h_all))
+                st.write(f"✅ **{len(q_all)} Quran verses** matched and ranked — "
+                         f"top 8 selected for answer")
+                for i, v in enumerate(q_all[:5], 1):
+                    st.write(f"&nbsp;&nbsp;&nbsp;&nbsp;#{i} → "
+                             f"Surah {v['surah_name']} {v['surah_no']}:{v['ayah_no']}")
+                if len(q_all) > 5:
+                    st.write(f"&nbsp;&nbsp;&nbsp;&nbsp;…and {len(q_all)-5} more")
+            else:
+                st.write("⚠️ No Quran verses matched.")
 
-            # Step 3 — Generate cited answer (top 8 + 6 to stay within token limit)
-            with st.spinner("✍️ Composing scholarly cited answer…"):
+            # ── Step 3: Hadith BM25 retrieval ─────────────────────────────
+            st.write("📜 **Step 3/4** — BM25 ranking across **4 Hadith collections** "
+                     "(Bukhari · Muslim · Abu Dawud · Tirmidhi)…")
+            st.write("&nbsp;&nbsp;&nbsp;&nbsp;↳ Searching in parallel across all books")
+            st.write("&nbsp;&nbsp;&nbsp;&nbsp;↳ Scoring with BM25Okapi + phrase boost")
+            h_all = retrieve_hadith(terms, top_n=15)
+            if h_all:
+                st.write(f"✅ **{len(h_all)} Hadiths** matched and ranked — "
+                         f"top 6 selected for answer")
+                for i, h in enumerate(h_all[:4], 1):
+                    nar = f" ({h['narrator']})" if h["narrator"] else ""
+                    st.write(f"&nbsp;&nbsp;&nbsp;&nbsp;#{i} → "
+                             f"{h['book']}, #{h['number']}{nar}")
+                if len(h_all) > 4:
+                    st.write(f"&nbsp;&nbsp;&nbsp;&nbsp;…and {len(h_all)-4} more")
+            else:
+                st.write("⚠️ No Hadiths matched.")
+
+            # ── Step 4: Answer generation ──────────────────────────────────
+            st.write("✍️ **Step 4/4** — Composing scholarly cited answer with "
+                     "Groq Llama 3.3 70B…")
+            st.write(f"&nbsp;&nbsp;&nbsp;&nbsp;↳ Sending top **{min(8,len(q_all))} verses** "
+                     f"+ **{min(6,len(h_all))} hadiths** as grounded context")
+
+            if not q_all and not h_all:
+                answer = ("No relevant verses or Hadiths found. "
+                          "Please rephrase or ask about a specific topic.")
+                status.update(label="❌ No results found", state="error")
+            else:
                 try:
                     answer = ask_groq(user_input, q_all[:8], h_all[:6])
+                    status.update(
+                        label=f"✅ Done — {len(q_all)} verses · {len(h_all)} hadiths searched · "
+                              f"{min(8,len(q_all))+min(6,len(h_all))} sources cited",
+                        state="complete", expanded=False
+                    )
                 except Exception as e:
                     answer = f"Error: {e}"
+                    status.update(label="❌ Error generating answer", state="error")
 
-            st.markdown(answer)
+        # Show retrieved sources in expanders
+        if q_all:
+            with st.expander(f"📖 {len(q_all)} Quran verses retrieved (ranked by BM25)"):
+                st.text(fmt_quran_display(q_all))
+        if h_all:
+            with st.expander(f"📜 {len(h_all)} Hadiths retrieved (ranked by BM25)"):
+                st.text(fmt_hadith_display(h_all))
+
+        st.markdown(answer)
 
     st.session_state.messages.append({"role": "assistant", "content": answer})
 
