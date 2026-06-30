@@ -1,76 +1,171 @@
 import streamlit as st
 import requests
 
-# ── Quran.com public API (no key, non-profit, free forever) ───────────────────
-QURAN_SEARCH_URL = "https://quran.com/api/v4/search"
-QURAN_VERSE_URL  = "https://quran.com/api/v4/verses/by_key/{key}"
-# Translation 131 = The Clear Quran by Dr. Mustafa Khattab (authentic, widely used)
-TRANSLATION_ID   = 131
+# ── API endpoints ─────────────────────────────────────────────────────────────
+# Quran: alquran.cloud — free, no auth, Sahih International (authentic)
+QURAN_SEARCH  = "https://api.alquran.cloud/v1/search/{query}/all/en.sahih"
+QURAN_ARABIC  = "https://api.alquran.cloud/v1/search/{query}/all/quran-uthmani"
 
-# ── Groq API (free tier, no credit card required) ────────────────────────────
-GROQ_API_URL     = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL       = "llama-3.1-8b-instant"   # fast, free-tier eligible
+# Hadith: fawazahmed0/hadith-api via jsDelivr CDN — free, no key, no rate limit
+# Books: Sahih Bukhari and Sahih Muslim (most authentic — Kutub al-Sittah)
+HADITH_SEARCH_URL = "https://cdn.jsdelivr.net/gh/fawazahmed0/hadith-api@1/editions/{book}.json"
+HADITH_BOOKS = ["eng-bukhari", "eng-muslim"]
 
-st.set_page_config(page_title="Quran Chatbot", page_icon="🕌", layout="centered")
+# Groq — free tier, no credit card
+GROQ_URL   = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODEL = "llama-3.1-8b-instant"
 
-# ── Sidebar ───────────────────────────────────────────────────────────────────
-with st.sidebar:
-    st.title("⚙️ Settings")
-    groq_key = st.text_input(
-        "Groq API Key",
-        type="password",
-        value=st.secrets.get("GROQ_API_KEY", ""),
-        help="Free, no credit card needed → https://console.groq.com/keys",
-    )
-    st.markdown("---")
-    st.markdown(
-        "**Verse data:** [Quran.com](https://quran.com) public API  \n"
-        "**Translation:** The Clear Quran *(Dr. Mustafa Khattab)*  \n"
-        "**LLM:** Llama 3.1 via [Groq](https://groq.com) free tier"
-    )
+# ── Page config ───────────────────────────────────────────────────────────────
+st.set_page_config(page_title="QUchat — Quran Q&A", page_icon="🕌", layout="centered")
+
+# ── Islamic UI styling ────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Amiri:ital,wght@0,400;0,700;1,400&family=Lato:wght@300;400;700&display=swap');
+
+  /* Background */
+  .stApp {
+    background: linear-gradient(160deg, #0d1b2a 0%, #1a2f1a 60%, #0d1b2a 100%);
+    color: #e8dcc8;
+    font-family: 'Lato', sans-serif;
+  }
+
+  /* Hide default streamlit header/footer */
+  #MainMenu, footer, header { visibility: hidden; }
+
+  /* Chat input */
+  .stChatInput textarea {
+    background: #1e3a2f !important;
+    color: #e8dcc8 !important;
+    border: 1px solid #c9a84c !important;
+    border-radius: 12px !important;
+  }
+
+  /* User message bubble */
+  [data-testid="stChatMessageContent"]:has(+ div [data-testid="stChatMessageAvatarUser"]),
+  .stChatMessage[data-testid*="user"] [data-testid="stChatMessageContent"] {
+    background: #1e3a2f;
+    border-left: 3px solid #c9a84c;
+    border-radius: 12px;
+    padding: 12px 16px;
+  }
+
+  /* Assistant message bubble */
+  .stChatMessage[data-testid*="assistant"] [data-testid="stChatMessageContent"] {
+    background: #162512;
+    border-left: 3px solid #4caf7d;
+    border-radius: 12px;
+    padding: 12px 16px;
+  }
+
+  /* Expander */
+  .streamlit-expanderHeader {
+    background: #1a2f1a !important;
+    color: #c9a84c !important;
+    border-radius: 8px !important;
+  }
+  .streamlit-expanderContent {
+    background: #111f11 !important;
+    border-radius: 0 0 8px 8px !important;
+    font-size: 0.85rem;
+    color: #b5c8a8;
+  }
+
+  /* Spinner */
+  .stSpinner > div { border-top-color: #c9a84c !important; }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: #0d1b2a; }
+  ::-webkit-scrollbar-thumb { background: #c9a84c; border-radius: 3px; }
+</style>
+""", unsafe_allow_html=True)
+
+# ── Header ────────────────────────────────────────────────────────────────────
+st.markdown("""
+<div style="text-align:center; padding: 2rem 0 1rem 0;">
+  <div style="font-size:3rem;">🕌</div>
+  <h1 style="font-family:'Amiri',serif; color:#c9a84c; font-size:2.4rem; margin:0;">
+    QUchat
+  </h1>
+  <p style="color:#8fad88; font-size:1rem; margin-top:0.3rem; letter-spacing:1px;">
+    Quran & Hadith Q&A — Grounded in Authentic Islamic Sources
+  </p>
+  <p style="font-family:'Amiri',serif; color:#c9a84c; font-size:1.3rem; margin-top:0.5rem;">
+    بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ
+  </p>
+</div>
+<hr style="border-color:#2a4a2a; margin-bottom:1rem;">
+""", unsafe_allow_html=True)
+
+# ── Disclaimer ────────────────────────────────────────────────────────────────
+st.info(
+    "⚠️ **Disclaimer:** This chatbot uses AI to interpret Quranic verses and Hadiths. "
+    "AI can make mistakes — always verify with a qualified Islamic scholar. "
+    "Quran text is Sahih International; Hadiths are from Sahih Bukhari & Sahih Muslim."
+)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def search_quran(query: str, num_results: int = 5) -> list[dict]:
-    params = {
-        "q": query,
-        "size": num_results,
-        "language": "en",
-        "translations": TRANSLATION_ID,
-    }
+def search_quran(query: str) -> tuple[str, list[dict]]:
+    """Returns (formatted_context, raw_results). Uses Sahih International."""
     try:
-        r = requests.get(QURAN_SEARCH_URL, params=params, timeout=10)
+        r = requests.get(QURAN_SEARCH.format(query=requests.utils.quote(query)), timeout=10)
         r.raise_for_status()
-        return r.json().get("search", {}).get("results", [])
-    except Exception as e:
-        st.warning(f"Quran search error: {e}")
-        return []
+        data = r.json()
+        matches = data.get("data", {}).get("matches", [])[:5]
+        if not matches:
+            return "", []
+        lines = []
+        for m in matches:
+            ref  = m.get("surah", {}).get("englishName", "") + " " + str(m.get("numberInSurah", ""))
+            key  = f"{m.get('surah', {}).get('number', '')}:{m.get('numberInSurah', '')}"
+            text = m.get("text", "")
+            lines.append(f"[{key}] {ref}\n{text}")
+        return "\n\n".join(lines), matches
+    except Exception:
+        return "", []
 
 
-def format_context(results: list[dict]) -> str:
-    lines = []
-    for r in results:
-        key         = r.get("verse_key", "")
-        arabic      = r.get("text_uthmani", "")
-        translation = ""
-        translations = r.get("translations", [])
-        if translations:
-            translation = translations[0].get("text", "")
-        lines.append(f"[{key}]\nArabic: {arabic}\nEnglish: {translation}")
-    return "\n\n".join(lines)
+def search_hadith(query: str) -> str:
+    """Keyword search across Bukhari and Muslim. Returns formatted context."""
+    keywords = [w.lower() for w in query.split() if len(w) > 3]
+    results = []
+    for book in HADITH_BOOKS:
+        try:
+            url = HADITH_SEARCH_URL.format(book=book)
+            r = requests.get(url, timeout=15)
+            r.raise_for_status()
+            hadiths = r.json().get("hadiths", [])
+            book_label = "Sahih Bukhari" if "bukhari" in book else "Sahih Muslim"
+            count = 0
+            for h in hadiths:
+                text = h.get("text", "").lower()
+                if any(kw in text for kw in keywords):
+                    results.append(
+                        f"[{book_label} #{h.get('hadithnumber', '')}]\n{h.get('text', '')}"
+                    )
+                    count += 1
+                    if count >= 2:
+                        break
+        except Exception:
+            continue
+    return "\n\n".join(results[:4])
 
 
-SYSTEM_PROMPT = (
-    "You are a knowledgeable Islamic assistant specialising in the Quran. "
-    "Answer questions strictly based on the Quranic verses provided. "
-    "Always cite the verse reference (Surah:Ayah) when quoting or paraphrasing. "
-    "If the provided verses do not contain enough information, say so honestly — "
-    "never fabricate or invent verses or interpretations. "
-    "Use respectful, clear language."
-)
+SYSTEM_PROMPT = """You are a knowledgeable Islamic assistant. Answer questions using ONLY the Quranic verses and Hadiths provided as context.
+
+Rules:
+- Always cite the reference (Surah:Ayah or Hadith book/number).
+- If context is insufficient, say so — never fabricate verses or Hadiths.
+- Prefer Quran over Hadith when both are available.
+- Use respectful, clear language. Add "ﷺ" after Prophet Muhammad's name."""
 
 
-def ask_groq(question: str, context: str, api_key: str) -> str:
+def ask_groq(question: str, context: str) -> str:
+    api_key = st.secrets.get("GROQ_API_KEY", "")
+    if not api_key:
+        return "⚠️ Groq API key not configured. Please add GROQ_API_KEY to your Streamlit secrets."
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -79,25 +174,16 @@ def ask_groq(question: str, context: str, api_key: str) -> str:
         "model": GROQ_MODEL,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": (
-                    f"Relevant Quranic verses:\n\n{context}\n\n"
-                    f"Question: {question}"
-                ),
-            },
+            {"role": "user", "content": f"Context:\n\n{context}\n\nQuestion: {question}"},
         ],
-        "temperature": 0.3,
+        "temperature": 0.2,
     }
-    r = requests.post(GROQ_API_URL, json=payload, headers=headers, timeout=30)
+    r = requests.post(GROQ_URL, json=payload, headers=headers, timeout=30)
     r.raise_for_status()
     return r.json()["choices"][0]["message"]["content"]
 
 
-# ── UI ────────────────────────────────────────────────────────────────────────
-st.title("🕌 Quran Q&A Chatbot")
-st.caption("Ask any question — answers are grounded in authentic Quranic verses.")
-
+# ── Chat UI ───────────────────────────────────────────────────────────────────
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
@@ -105,37 +191,62 @@ for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-if user_input := st.chat_input("Ask a question about the Quran…"):
-    if not groq_key:
-        st.error("Please enter your Groq API key in the sidebar.")
-        st.stop()
-
+if user_input := st.chat_input("Ask about the Quran or Islam…"):
     st.session_state.messages.append({"role": "user", "content": user_input})
     with st.chat_message("user"):
         st.markdown(user_input)
 
     with st.chat_message("assistant"):
+        # 1. Search Quran
         with st.spinner("Searching Quran…"):
-            results = search_quran(user_input)
+            quran_context, quran_matches = search_quran(user_input)
 
-        if not results:
+        # 2. If Quran didn't return enough, also search Hadith
+        hadith_context = ""
+        if not quran_matches:
+            with st.spinner("Searching Hadith…"):
+                hadith_context = search_hadith(user_input)
+
+        combined_context = ""
+        if quran_context:
+            combined_context += f"=== Quran (Sahih International) ===\n{quran_context}"
+        if hadith_context:
+            combined_context += f"\n\n=== Hadith (Sahih Bukhari / Sahih Muslim) ===\n{hadith_context}"
+
+        if not combined_context:
             answer = (
-                "I could not find relevant verses for your question. "
-                "Try rephrasing or ask about a specific topic or verse."
+                "I could not find relevant verses or Hadiths for your question. "
+                "Please try rephrasing, or ask about a specific topic or verse reference."
             )
             st.markdown(answer)
         else:
-            context = format_context(results)
-
-            with st.expander("📖 Source verses"):
-                st.text(context)
+            if quran_context:
+                with st.expander("📖 Quran verses used"):
+                    st.text(quran_context)
+            if hadith_context:
+                with st.expander("📜 Hadith used"):
+                    st.text(hadith_context)
 
             with st.spinner("Generating answer…"):
                 try:
-                    answer = ask_groq(user_input, context, groq_key)
+                    answer = ask_groq(user_input, combined_context)
                 except Exception as e:
-                    answer = f"Error: {e}"
+                    answer = f"Error contacting AI: {e}"
 
             st.markdown(answer)
 
     st.session_state.messages.append({"role": "assistant", "content": answer})
+
+# ── Footer ────────────────────────────────────────────────────────────────────
+st.markdown("""
+<hr style="border-color:#2a4a2a; margin-top:2rem;">
+<p style="text-align:center; color:#4a6a4a; font-size:0.78rem; margin:0.5rem 0;">
+  Quran text · <a href="https://alquran.cloud" style="color:#6a9a6a;">alquran.cloud</a> (Sahih International) &nbsp;|&nbsp;
+  Hadith · <a href="https://github.com/fawazahmed0/hadith-api" style="color:#6a9a6a;">fawazahmed0/hadith-api</a> (Bukhari & Muslim) &nbsp;|&nbsp;
+  AI · <a href="https://groq.com" style="color:#6a9a6a;">Groq</a> Llama 3.1 &nbsp;|&nbsp;
+  Built with <a href="https://streamlit.io" style="color:#6a9a6a;">Streamlit</a>
+</p>
+<p style="text-align:center; color:#3a5a3a; font-size:0.72rem; margin:0.2rem 0 1rem 0;">
+  All sources are free & open. No user data is stored.
+</p>
+""", unsafe_allow_html=True)
