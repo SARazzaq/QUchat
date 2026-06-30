@@ -1,28 +1,33 @@
 import streamlit as st
 import requests
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ══════════════════════════════════════════════════════════════════════════════
-# API ENDPOINTS
-# Primary   : alquran.cloud  (Islamic Network — open, no key)
-# Fallback  : islamic.app    (Cloudflare edge, 600 req/min, no key)
-# Hadith P  : fawazahmed0/hadith-api via jsDelivr CDN (no key, no rate limit)
-# Hadith FB : islamic.app /v1/hadith/search  (50k hadiths, full-text, no key)
+# ENDPOINTS
+# Quran full corpus : alquran.cloud/v1/quran/en.sahih  (all 6236 verses, no auth)
+# Quran fallback    : fawazahmed0/quran-api via jsDelivr (JSON dump, no auth)
+# Hadith primary    : fawazahmed0/hadith-api Bukhari + Muslim via jsDelivr CDN
+# Hadith fallback   : Abu Dawud + Tirmidhi from same CDN
+# LLM               : Groq Llama 3.3 70B (free tier)
 # ══════════════════════════════════════════════════════════════════════════════
 
-ALQURAN_SEARCH    = "https://api.alquran.cloud/v1/search/{q}/all/en.sahih"
-ALQURAN_VERSE     = "https://api.alquran.cloud/v1/ayah/{key}/en.sahih"
-ISLAMICAPP_SEARCH = "https://api.islamic.app/v1/search"
-ISLAMICAPP_HADITH = "https://api.islamic.app/v1/hadith/search"
+QURAN_FULL_URL  = "https://api.alquran.cloud/v1/quran/en.sahih"
+QURAN_ARABIC_URL= "https://api.alquran.cloud/v1/quran/quran-uthmani"
+HADITH_CDN      = "https://cdn.jsdelivr.net/gh/fawazahmed0/hadith-api@1/editions/{book}.json"
 
-HADITH_CDN   = "https://cdn.jsdelivr.net/gh/fawazahmed0/hadith-api@1/editions/{book}.json"
-HADITH_BOOKS = {"Sahih Bukhari": "eng-bukhari", "Sahih Muslim": "eng-muslim"}
+HADITH_BOOKS = {
+    "Sahih Bukhari":  "eng-bukhari",
+    "Sahih Muslim":   "eng-muslim",
+    "Sunan Abu Dawud":"eng-abudawud",
+    "Jami at-Tirmidhi":"eng-tirmidhi",
+}
 
-GROQ_URL  = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_URL   = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL = "llama-3.3-70b-versatile"
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STREAMLIT CONFIG
+# PAGE CONFIG & CSS
 # ══════════════════════════════════════════════════════════════════════════════
 st.set_page_config(page_title="QUchat", page_icon="🕌", layout="centered")
 
@@ -42,7 +47,7 @@ html, body, [class*="css"] { font-family:'Inter',sans-serif; color:#f0ece4; }
 .stChatInput textarea::placeholder { color:#7a9a7a !important; }
 .stChatMessage { background:transparent !important; }
 [data-testid="stChatMessageContent"] {
-    font-family:'Inter',sans-serif; font-size:1rem; line-height:1.85; color:#f0ece4;
+    font-family:'Inter',sans-serif; font-size:1rem; line-height:1.9; color:#f0ece4;
 }
 details {
     background:#152015 !important; border:1px solid #2a4a2a !important;
@@ -90,360 +95,307 @@ st.markdown("""
 st.info(
     "⚠️ **Disclaimer:** Answers are AI-generated and grounded in authentic Islamic sources. "
     "AI can make mistakes — always verify with a qualified Islamic scholar. "
-    "Quran: Sahih International · Hadith: Sahih Bukhari & Sahih Muslim."
+    "Quran: Sahih International · Hadith: Bukhari, Muslim, Abu Dawud, Tirmidhi."
 )
 
 # ══════════════════════════════════════════════════════════════════════════════
-# QUERY EXPANSION
+# GROQ HELPER (shared for both query-expansion and final answer)
 # ══════════════════════════════════════════════════════════════════════════════
 
-SYNONYMS = {
-    "namaz":["salah","prayer","salat","worship","prostrate","bow","establish"],
-    "salah":["namaz","prayer","salat","worship","prostrate"],
-    "prayer":["salah","namaz","salat","worship","dua","supplication"],
-    "salat":["salah","namaz","prayer"],
-    "roza":["fasting","sawm","fast","ramadan"],
-    "fasting":["roza","sawm","fast","ramadan","hunger"],
-    "sawm":["fasting","roza","fast"],
-    "zakat":["charity","alms","zakah","give","poor","needy"],
-    "hajj":["pilgrimage","makkah","kabah","kaaba"],
-    "jihad":["struggle","striving","fight","effort"],
-    "mandatory":["obligatory","fard","compulsory","wajib","required","duty"],
-    "obligatory":["mandatory","fard","compulsory","wajib"],
-    "forbidden":["haram","prohibited","unlawful","disallowed"],
-    "haram":["forbidden","prohibited","unlawful"],
-    "halal":["permissible","allowed","lawful"],
-    "heaven":["paradise","jannah","garden"],
-    "paradise":["heaven","jannah","garden","afterlife"],
-    "jannah":["paradise","heaven","garden"],
-    "hell":["jahannam","fire","punishment","torment"],
-    "quran":["revelation","scripture","book","verses"],
-    "prophet":["muhammad","messenger","rasool","nabi"],
-    "muhammad":["prophet","messenger","rasool","nabi"],
-    "allah":["god","lord","creator","rabb"],
-    "sin":["transgression","evil","wrong","disobey"],
-    "repentance":["tawbah","forgiveness","tawba","mercy"],
-    "tawbah":["repentance","forgiveness"],
-    "death":["dying","afterlife","akhirah","soul"],
-    "akhirah":["afterlife","hereafter","death","resurrection"],
-    "alcohol":["wine","khamr","intoxicant","drinking","liquor"],
-    "interest":["riba","usury","bank"],
-    "riba":["interest","usury"],
-    "marriage":["nikah","wife","husband","spouse","wed"],
-    "nikah":["marriage","wed","spouse"],
-    "divorce":["talaq","separation","wife"],
-    "talaq":["divorce","separation"],
-    "women":["female","mother","wife","sister","hijab"],
-    "hijab":["veil","cover","women","modesty","purdah"],
-    "charity":["sadaqah","zakat","give","poor","needy","help"],
-    "sadaqah":["charity","give","poor"],
-    "parents":["mother","father","family","obedience","honor"],
-    "justice":["adl","fairness","equity","rights"],
-    "patience":["sabr","endure","trial","hardship"],
-    "sabr":["patience","endure"],
-    "knowledge":["ilm","learn","education","wisdom"],
-    "ilm":["knowledge","learn","education"],
-    "food":["eat","halal","haram","meat","pork","pig"],
-    "pork":["pig","swine","forbidden","haram","food"],
-}
-
-
-def expand_queries(question: str) -> list[str]:
-    q      = question.lower().strip()
-    tokens = [w.strip("?.,!;:'\"") for w in q.split() if len(w.strip("?.,!;:'\"")) > 2]
-    queries: set[str] = set()
-
-    # raw tokens
-    for t in tokens:
-        queries.add(t)
-        for syn in SYNONYMS.get(t, []):
-            queries.add(syn)
-
-    # bigrams
-    for i in range(len(tokens) - 1):
-        queries.add(f"{tokens[i]} {tokens[i+1]}")
-
-    # full question
-    queries.add(question)
-
-    # topic-level short queries (3-word max)
-    meaningful = [t for t in tokens if len(t) > 3]
-    for t in meaningful[:5]:
-        queries.add(t)
-
-    return list(queries)[:15]
+def _groq_call(messages: list[dict], max_tokens: int = 500, temperature: float = 0.1) -> str:
+    api_key = st.secrets.get("GROQ_API_KEY", "")
+    if not api_key:
+        return ""
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    payload = {
+        "model": GROQ_MODEL,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    r = requests.post(GROQ_URL, json=payload, headers=headers, timeout=30)
+    r.raise_for_status()
+    return r.json()["choices"][0]["message"]["content"]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# QURAN SEARCH  (primary: alquran.cloud  |  fallback: islamic.app)
+# STEP 1 — LLM-POWERED QUERY ANALYSIS
+# Ask Groq to analyse the question 10 ways and return search keywords
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _alquran_search_one(q: str) -> list[dict]:
+def generate_search_terms(question: str) -> list[str]:
+    """
+    Use the LLM to think about the question from 10 Islamic angles and
+    return a rich list of search keywords covering every dimension.
+    """
+    prompt = f"""You are an Islamic scholar preparing to search the Quran and Hadith.
+
+Analyse this question from 10 different angles:
+1. Literal meaning of the question
+2. Islamic terminology / Arabic terms related to it
+3. Related religious obligations or prohibitions
+4. Related concepts (e.g. if about prayer → also: wudu, qibla, times, pillars)
+5. Related people/prophets mentioned in Quran
+6. Related events or stories in Quran/Hadith
+7. Spiritual/moral dimensions
+8. Legal/fiqh dimensions
+9. Reward/punishment angles
+10. Synonyms and alternate phrasings
+
+Question: {question}
+
+Output ONLY a Python list of single-word and short-phrase search terms (no explanations).
+Include both English and transliterated Arabic terms.
+Example format: ["prayer", "salah", "salat", "namaz", "establish prayer", "five prayers", ...]
+Output 25-40 terms. Output ONLY the list, nothing else."""
+
     try:
-        r = requests.get(
-            ALQURAN_SEARCH.format(q=requests.utils.quote(q)),
-            timeout=8
+        raw = _groq_call(
+            [{"role": "user", "content": prompt}],
+            max_tokens=400,
+            temperature=0.2,
         )
-        if r.status_code == 200:
-            return r.json().get("data", {}).get("matches", [])
+        # Parse the list from the response
+        match = re.search(r'\[.*?\]', raw, re.DOTALL)
+        if match:
+            terms = eval(match.group())  # safe — we control the prompt format
+            if isinstance(terms, list):
+                return [str(t).strip().lower() for t in terms if t and len(str(t).strip()) > 1]
     except Exception:
         pass
-    return []
+
+    # Fallback: basic tokenisation
+    tokens = [w.strip("?.,!;:'\"").lower() for w in question.split() if len(w) > 2]
+    return tokens
 
 
-def _islamicapp_search(q: str) -> list[dict]:
-    """Fallback: islamic.app /v1/search — returns quran.com-compatible verses."""
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 2 — LOAD FULL CORPORA (cached — loaded once per session)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_full_quran() -> list[dict]:
+    """
+    Load the complete Quran (6236 verses, Sahih International).
+    Returns list of dicts: {surah_no, surah_name, ayah_no, text}
+    """
+    verses = []
     try:
-        r = requests.get(
-            ISLAMICAPP_SEARCH,
-            params={"q": q, "size": 10, "translations": "20"},  # 20 = Sahih International
-            timeout=8,
-        )
-        if r.status_code == 200:
-            data = r.json()
-            # islamic.app mirrors quran.com shape
-            results = (
-                data.get("search", {}).get("results", [])
-                or data.get("results", [])
-                or []
-            )
-            hits = []
-            for res in results:
-                verse_key = res.get("verse_key", "")
-                if not verse_key:
-                    continue
-                parts = verse_key.split(":")
-                if len(parts) != 2:
-                    continue
-                surah_no, ayah_no = parts
-                hits.append({
-                    "surah": {
-                        "number": int(surah_no),
-                        "englishName": res.get("surah_name_english", f"Surah {surah_no}"),
-                        "name": res.get("surah_name", ""),
-                    },
-                    "numberInSurah": int(ayah_no),
-                    "text": (res.get("translations") or [{}])[0].get("text", "")
-                            or res.get("text", ""),
-                    "_source": "islamic.app",
+        r = requests.get(QURAN_FULL_URL, timeout=30)
+        r.raise_for_status()
+        surahs = r.json().get("data", {}).get("surahs", [])
+        for surah in surahs:
+            sno   = surah.get("number", 0)
+            sname = surah.get("englishName", f"Surah {sno}")
+            sarab = surah.get("name", "")
+            for ayah in surah.get("ayahs", []):
+                verses.append({
+                    "surah_no":   sno,
+                    "surah_name": sname,
+                    "surah_arab": sarab,
+                    "ayah_no":    ayah.get("numberInSurah", 0),
+                    "text":       ayah.get("text", ""),
                 })
-            return hits
     except Exception:
         pass
-    return []
+    return verses
 
 
-def search_quran(question: str) -> tuple[str, bool]:
-    queries = expand_queries(question)
-    seen: set[str] = set()
-    hits: list[dict] = []
-
-    def fetch(q):
-        return _alquran_search_one(q)
-
-    # Run all queries in parallel
-    with ThreadPoolExecutor(max_workers=6) as pool:
-        futures = {pool.submit(fetch, q): q for q in queries}
-        for fut in as_completed(futures):
-            for m in fut.result():
-                sn = m.get("surah", {}).get("number", 0)
-                an = m.get("numberInSurah", 0)
-                key = f"{sn}:{an}"
-                if key not in seen:
-                    seen.add(key)
-                    hits.append(m)
-
-    # If primary returned nothing, try islamic.app fallback
-    if not hits:
-        for q in queries[:5]:
-            for m in _islamicapp_search(q):
-                sn = m.get("surah", {}).get("number", 0)
-                an = m.get("numberInSurah", 0)
-                key = f"{sn}:{an}"
-                if key not in seen:
-                    seen.add(key)
-                    hits.append(m)
-
-    if not hits:
-        return "", False
-
-    hits.sort(key=lambda m: (m.get("surah", {}).get("number", 0), m.get("numberInSurah", 0)))
-
-    lines = []
-    for m in hits[:15]:
-        sname  = m.get("surah", {}).get("englishName", "")
-        sarab  = m.get("surah", {}).get("name", "")
-        sno    = m.get("surah", {}).get("number", "")
-        ano    = m.get("numberInSurah", "")
-        text   = m.get("text", "")
-        src    = m.get("_source", "alquran.cloud")
-        lines.append(
-            f"[Surah {sname} ({sarab}) — Chapter {sno}, Verse {ano}] [{src}]\n{text}"
-        )
-
-    return "\n\n".join(lines), True
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# HADITH SEARCH  (primary: fawazahmed0 CDN  |  fallback: islamic.app)
-# ══════════════════════════════════════════════════════════════════════════════
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def _load_hadith_book(book_id: str) -> list[dict]:
-    """Cache the full hadith book in memory for fast keyword search."""
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_hadith_book(book_id: str) -> list[dict]:
+    """Load and cache a full hadith book from jsDelivr CDN."""
     try:
-        r = requests.get(HADITH_CDN.format(book=book_id), timeout=25)
+        r = requests.get(HADITH_CDN.format(book=book_id), timeout=30)
         r.raise_for_status()
         return r.json().get("hadiths", [])
     except Exception:
         return []
 
 
-def _islamicapp_hadith_search(keyword: str) -> list[dict]:
-    """Fallback: islamic.app full-text hadith search."""
-    try:
-        r = requests.get(
-            ISLAMICAPP_HADITH,
-            params={"q": keyword, "collections": "bukhari,muslim", "limit": 4},
-            timeout=8,
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 3 — FULL-CORPUS SEARCH
+# ══════════════════════════════════════════════════════════════════════════════
+
+def search_quran_full(terms: list[str]) -> tuple[str, int]:
+    """
+    Search ALL 6236 Quran verses for any of the given terms.
+    Scores each verse by how many terms it matches — returns top matches.
+    """
+    verses = load_full_quran()
+    if not verses:
+        return "", 0
+
+    # Score every verse
+    scored = []
+    terms_lower = [t.lower() for t in terms]
+
+    for v in verses:
+        text_lower = v["text"].lower()
+        score = sum(1 for t in terms_lower if t in text_lower)
+        # Boost multi-word phrase matches
+        score += sum(2 for t in terms_lower if " " in t and t in text_lower)
+        if score > 0:
+            scored.append((score, v))
+
+    # Sort by score descending, then by surah/ayah
+    scored.sort(key=lambda x: (-x[0], x[1]["surah_no"], x[1]["ayah_no"]))
+
+    # Take top 25 most relevant verses
+    top = scored[:25]
+
+    if not top:
+        return "", 0
+
+    lines = []
+    for _, v in top:
+        lines.append(
+            f"[Surah {v['surah_name']} ({v['surah_arab']}) — "
+            f"Chapter {v['surah_no']}, Verse {v['ayah_no']}]\n"
+            f"{v['text']}"
         )
-        if r.status_code == 200:
-            return r.json().get("results", [])
-    except Exception:
-        pass
-    return []
+
+    return "\n\n".join(lines), len(top)
 
 
-def search_hadith(question: str) -> tuple[str, bool]:
-    queries  = expand_queries(question)
-    keywords = [q.lower() for q in queries if len(q.split()) == 1 and len(q) > 3]
-    seen:    set[str] = set()
-    results: list[str] = []
+def search_hadith_full(terms: list[str]) -> tuple[str, int]:
+    """
+    Search ALL hadith across 4 books (Bukhari, Muslim, Abu Dawud, Tirmidhi).
+    Scores each hadith by term matches — returns top matches.
+    """
+    terms_lower = [t.lower() for t in terms]
+    scored: list[tuple[int, str, dict]] = []
+    seen: set[str] = set()
 
-    # Primary: search cached CDN books
-    for book_name, book_id in HADITH_BOOKS.items():
-        hadiths = _load_hadith_book(book_id)
-        count   = 0
+    def search_book(book_name: str, book_id: str):
+        hadiths = load_hadith_book(book_id)
+        local   = []
         for h in hadiths:
-            text = h.get("text", "")
-            hid  = f"{book_id}-{h.get('hadithnumber','')}"
-            if hid in seen:
+            text  = h.get("text", "")
+            hid   = f"{book_id}-{h.get('hadithnumber','')}"
+            if hid in seen or not text:
                 continue
-            if any(kw in text.lower() for kw in keywords):
-                seen.add(hid)
-                narrator = h.get("by", "")
-                nar_str  = f" — Narrated by: {narrator}" if narrator else ""
-                results.append(
-                    f"[{book_name}, Hadith #{h.get('hadithnumber','')}{nar_str}]\n{text}"
-                )
-                count += 1
-                if count >= 4:
-                    break
+            text_lower = text.lower()
+            score = sum(1 for t in terms_lower if t in text_lower)
+            score += sum(2 for t in terms_lower if " " in t and t in text_lower)
+            if score > 0:
+                local.append((score, book_name, h, hid))
+        return local
 
-    # Fallback: islamic.app hadith search if primary found nothing
-    if not results:
-        for kw in keywords[:3]:
-            for h in _islamicapp_hadith_search(kw):
-                coll = h.get("collection", "")
-                num  = h.get("hadithNumber", "")
-                text = h.get("text", "") or h.get("body", "")
-                hid  = f"islamic.app-{coll}-{num}"
-                if hid not in seen and text:
+    # Load all 4 books in parallel
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = {
+            pool.submit(search_book, bn, bi): bn
+            for bn, bi in HADITH_BOOKS.items()
+        }
+        for fut in as_completed(futures):
+            for score, bname, h, hid in fut.result():
+                if hid not in seen:
                     seen.add(hid)
-                    results.append(f"[{coll.title()}, Hadith #{num} — islamic.app]\n{text}")
+                    scored.append((score, bname, h))
 
-    return "\n\n".join(results[:8]), bool(results)
+    scored.sort(key=lambda x: -x[0])
+    top = scored[:20]
+
+    if not top:
+        return "", 0
+
+    lines = []
+    for _, book_name, h in top:
+        narrator = h.get("by", "")
+        nar_str  = f" — Narrated by: {narrator}" if narrator else ""
+        lines.append(
+            f"[{book_name}, Hadith #{h.get('hadithnumber','')}{nar_str}]\n"
+            f"{h.get('text','')}"
+        )
+
+    return "\n\n".join(lines), len(top)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SYSTEM PROMPT
 # ══════════════════════════════════════════════════════════════════════════════
 
-SYSTEM_PROMPT = """You are a deeply knowledgeable Islamic scholar. Your task is to give thorough, properly referenced answers using ONLY the Quran and Hadith sources provided.
+SYSTEM_PROMPT = """You are a deeply knowledgeable Islamic scholar. Answer using ONLY the Quran verses and Hadiths provided — never fabricate.
 
-═══════════ MANDATORY ANSWER STRUCTURE ═══════════
+═══════════ MANDATORY STRUCTURE ═══════════
 
 ## 📖 From the Quran
 
 For EVERY verse in the context:
 
-**Surah [Name] ([Arabic Name]) — Chapter [X], Verse [Y]**
+**Surah [Name] ([Arabic]) — Chapter [X], Verse [Y]**
 
-> [Paste the COMPLETE verbatim text of the verse exactly as given — do not shorten or paraphrase]
+> [Paste the COMPLETE verbatim text of the verse — do not shorten]
 
-**Explanation:** Write a detailed explanation of this verse in the context of the question. Cover:
+**Explanation:** Detailed explanation covering:
 - What Allah ﷻ is commanding, forbidding, or informing
-- The significance and depth of this specific verse
-- How it directly answers the question
-- Any important nuance in the wording
+- The depth and significance of this verse
+- How it directly answers the question asked
+- Nuances in wording important to understand
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 ## 📜 From the Hadith
 
 For EVERY Hadith in the context:
 
-**[Book Name], Hadith #[Number] — Narrated by: [Narrator] (رضي الله عنه/عنها)**
+**[Book], Hadith #[N] — Narrated by: [Name] (رضي الله عنه/عنها)**
 
-> [Paste the COMPLETE verbatim text of the Hadith exactly as given — do not shorten or paraphrase]
+> [Paste the COMPLETE verbatim text of the Hadith — do not shorten]
 
-**Explanation:** Write a detailed explanation of this Hadith in the context of the question. Cover:
+**Explanation:** Detailed explanation covering:
 - What the Prophet ﷺ said, did, or approved
 - The ruling or guidance it establishes
-- How it complements or elaborates on the Quranic verses above
-- Its importance for the question asked
+- How it supports or elaborates on the Quranic evidence
+- Its relevance to the question
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 ## ✅ Islamic Ruling & Summary
 
-Write a complete, clear Islamic ruling that:
-1. States whether the matter is Fard (فرض obligatory), Sunnah (مستحب recommended), Haram (حرام forbidden), or Mubah (مباح permissible)
-2. Summarises the combined evidence from both Quran and Hadith above
-3. Explains the wisdom behind this ruling in Islam
+- State the ruling: Fard (فرض) / Sunnah (سنة) / Haram (حرام) / Mubah (مباح)
+- Summarise the cumulative evidence
+- Explain the Islamic wisdom behind it
 
-═══════════════════════════════════════════
+═══════════════════════════
 
-ABSOLUTE RULES — never break these:
-1. ALWAYS paste the full verbatim text of every verse and hadith in blockquote (>) before explaining
-2. Cover EVERY verse and EVERY hadith in the context — skip none
-3. Write ﷺ after every mention of Prophet Muhammad
-4. Write رضي الله عنه / رضي الله عنها after every Companion's name
-5. Never fabricate, invent, or add anything not present in the provided sources
-6. Be thorough — long detailed answers are required
-7. Read the question from every possible angle before answering"""
+RULES:
+1. Quote every single source verbatim in blockquote before explaining — no exceptions
+2. Cover EVERY verse and EVERY hadith provided — skip none
+3. ﷺ after Prophet Muhammad every time
+4. رضي الله عنه/عنها after every Companion
+5. Never add content beyond what is in the provided sources
+6. Long, thorough, scholarly answers required"""
 
 
-def ask_groq(question: str, context: str) -> str:
+def ask_groq_full(question: str, context: str) -> str:
     api_key = st.secrets.get("GROQ_API_KEY", "")
     if not api_key:
         return "⚠️ Groq API key not configured. Add GROQ_API_KEY to your Streamlit secrets."
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    payload = {
-        "model": GROQ_MODEL,
-        "messages": [
+
+    user_msg = (
+        f"QUESTION: {question}\n\n"
+        f"Analyse this question from every possible dimension — "
+        f"linguistic, theological, legal (fiqh), moral, and spiritual — "
+        f"before constructing your answer.\n\n"
+        f"{'═'*60}\n"
+        f"ALL RETRIEVED AUTHENTIC ISLAMIC SOURCES\n"
+        f"{'═'*60}\n\n"
+        f"{context}\n\n"
+        f"{'═'*60}\n\n"
+        f"Now write the complete, detailed, fully-referenced scholarly answer "
+        f"following the mandatory structure. "
+        f"Quote every verse and hadith verbatim first, then give thorough explanations."
+    )
+
+    return _groq_call(
+        [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": (
-                    f"QUESTION: {question}\n\n"
-                    f"Analyse this question from every angle — linguistic, theological, and practical.\n\n"
-                    f"{'═'*55}\n"
-                    f"AUTHENTIC ISLAMIC SOURCES\n"
-                    f"{'═'*55}\n\n"
-                    f"{context}\n\n"
-                    f"{'═'*55}\n\n"
-                    f"Now write a full, detailed, properly referenced answer "
-                    f"following the mandatory structure. Quote every source verbatim first, then explain."
-                ),
-            },
+            {"role": "user",   "content": user_msg},
         ],
-        "temperature": 0.1,
-        "max_tokens": 4096,
-    }
-    r = requests.post(GROQ_URL, json=payload, headers=headers, timeout=60)
-    r.raise_for_status()
-    return r.json()["choices"][0]["message"]["content"]
+        max_tokens=4096,
+        temperature=0.1,
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -463,41 +415,54 @@ if user_input := st.chat_input("Ask about the Quran or Islam…"):
         st.markdown(user_input)
 
     with st.chat_message("assistant"):
-        with st.spinner("🔍 Searching Quran across multiple angles…"):
-            quran_ctx, quran_found = search_quran(user_input)
 
-        with st.spinner("📜 Searching Hadith…"):
-            hadith_ctx, hadith_found = search_hadith(user_input)
+        # ── Step 1: LLM analyses question → generates search terms ────────────
+        with st.spinner("🧠 Analysing question from 10 Islamic angles…"):
+            search_terms = generate_search_terms(user_input)
 
+        with st.expander(f"🔎 {len(search_terms)} search terms generated"):
+            st.write(", ".join(search_terms))
+
+        # ── Step 2: Full-corpus Quran search ─────────────────────────────────
+        with st.spinner("📖 Searching all 6,236 Quran verses…"):
+            quran_ctx, verse_count = search_quran_full(search_terms)
+
+        # ── Step 3: Full-corpus Hadith search ─────────────────────────────────
+        with st.spinner("📜 Searching Bukhari, Muslim, Abu Dawud & Tirmidhi…"):
+            hadith_ctx, hadith_count = search_hadith_full(search_terms)
+
+        # ── Build combined context ────────────────────────────────────────────
         sections = []
-        if quran_found:
-            sections.append(f"=== QURAN (Sahih International Translation) ===\n\n{quran_ctx}")
-        if hadith_found:
-            sections.append(f"=== HADITH (Sahih Bukhari / Sahih Muslim) ===\n\n{hadith_ctx}")
+        if quran_ctx:
+            sections.append(
+                f"=== QURAN — {verse_count} verses (Sahih International) ===\n\n{quran_ctx}"
+            )
+        if hadith_ctx:
+            sections.append(
+                f"=== HADITH — {hadith_count} hadiths (Bukhari / Muslim / Abu Dawud / Tirmidhi) ===\n\n{hadith_ctx}"
+            )
         combined = "\n\n".join(sections)
 
         if not combined:
             answer = (
                 "I could not find relevant Quranic verses or Hadiths for your question. "
-                "Please try rephrasing, or ask about a specific topic or verse."
+                "Please try rephrasing or asking about a specific topic or verse."
             )
             st.markdown(answer)
         else:
-            verse_count  = quran_ctx.count("[Surah ") if quran_found else 0
-            hadith_count = hadith_ctx.count(", Hadith #") if hadith_found else 0
-
-            if quran_found:
-                with st.expander(f"📖 {verse_count} Quran verse(s) retrieved"):
+            if quran_ctx:
+                with st.expander(f"📖 {verse_count} Quran verses retrieved"):
                     st.text(quran_ctx)
-            if hadith_found:
+            if hadith_ctx:
                 with st.expander(f"📜 {hadith_count} Hadith retrieved"):
                     st.text(hadith_ctx)
 
-            with st.spinner("✍️ Composing detailed answer…"):
+            # ── Step 4: Generate answer ───────────────────────────────────────
+            with st.spinner("✍️ Composing detailed scholarly answer…"):
                 try:
-                    answer = ask_groq(user_input, combined)
+                    answer = ask_groq_full(user_input, combined)
                 except Exception as e:
-                    answer = f"Error contacting AI: {e}"
+                    answer = f"Error: {e}"
 
             st.markdown(answer)
 
@@ -507,8 +472,8 @@ if user_input := st.chat_input("Ask about the Quran or Islam…"):
 st.markdown("""
 <hr>
 <p style="text-align:center; color:#4a7a4a; font-size:0.78rem; margin:0.6rem 0 0.2rem 0;">
-  Quran · <a href="https://alquran.cloud">alquran.cloud</a> + <a href="https://islamic.app">islamic.app</a> (Sahih International) &nbsp;·&nbsp;
-  Hadith · <a href="https://github.com/fawazahmed0/hadith-api">fawazahmed0</a> + <a href="https://islamic.app">islamic.app</a> (Bukhari & Muslim) &nbsp;·&nbsp;
+  Quran · <a href="https://alquran.cloud">alquran.cloud</a> (Sahih International, all 6236 verses) &nbsp;·&nbsp;
+  Hadith · <a href="https://github.com/fawazahmed0/hadith-api">fawazahmed0/hadith-api</a> (Bukhari · Muslim · Abu Dawud · Tirmidhi) &nbsp;·&nbsp;
   LLM · <a href="https://groq.com">Groq</a> Llama 3.3 70B &nbsp;·&nbsp;
   UI · <a href="https://streamlit.io">Streamlit</a>
 </p>
