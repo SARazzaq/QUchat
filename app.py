@@ -438,11 +438,19 @@ def ask_groq(question: str, q_llm: list[dict], h_llm: list[dict]) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# WARM UP INDICES ON APP START
+# BACKGROUND INDEX WARM-UP
+# Trigger index build in a background thread so the UI renders instantly.
+# @st.cache_resource ensures it only runs once and all sessions reuse it.
 # ══════════════════════════════════════════════════════════════════════════════
-with st.spinner("📚 Loading Quran & Hadith corpus (first load only)…"):
-    _qv, _qi = build_quran_index()
-    _hv, _hi = build_hadith_index()
+import threading
+
+def _warm():
+    build_quran_index()
+    build_hadith_index()
+
+if "index_warming" not in st.session_state:
+    st.session_state["index_warming"] = True
+    threading.Thread(target=_warm, daemon=True).start()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -474,6 +482,9 @@ if user_input := st.chat_input("Ask about the Quran or Islam…"):
             # ── Step 2: Quran BM25 retrieval ──────────────────────────────
             st.write("📖 **Step 2/4** — BM25 ranking across all **6,236 Quran verses** "
                      "(Sahih International)…")
+            verses, q_bm25 = build_quran_index()
+            if not verses:
+                st.write("⏳ Corpus still loading — retrying…")
             st.write("&nbsp;&nbsp;&nbsp;&nbsp;↳ Normalising query: lemmatisation + stemming via NLTK")
             st.write("&nbsp;&nbsp;&nbsp;&nbsp;↳ Scoring every verse with BM25Okapi "
                      "(TF-IDF + document length normalisation)")
